@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ─── CONFIG ────────────────────────────────────────────────────────────────
+CONFIG_DIR="${HOME}/.newo"
+CONFIG_FILE="${CONFIG_DIR}/config"
+API_URL="https://api.newo.dev/fatture/nuova/piva"
+
+mkdir -p "$CONFIG_DIR"
+if [[ -f "$CONFIG_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+fi
+if [[ -z "${NEWO_API_TOKEN:-}" ]]; then
+  echo -e "\e[1;33mInserisci il tuo NEWO API Token:\e[0m"
+  read -r token
+  cat > "$CONFIG_FILE" <<EOF
+# Config per newo-cli
+export NEWO_API_TOKEN="$token"
+EOF
+  chmod 600 "$CONFIG_FILE"
+  export NEWO_API_TOKEN="$token"
+  echo -e "🔒 Token salvato in \e[1;34m$CONFIG_FILE\e[0m"
+fi
+API_TOKEN="$NEWO_API_TOKEN"
+
+# ─── COLORI & FUNZIONI ──────────────────────────────────────────────────────
+GREEN=$'\e[1;32m'; YELLOW=$'\e[1;33m'; BLUE=$'\e[1;34m'; RED=$'\e[1;31m'; RESET=$'\e[0m'
+function header() { echo -e "${BLUE}=== $1 ===${RESET}"; }
+
+# ─── 1) Partita IVA ─────────────────────────────────────────────────────────
+header "Creazione guidata fattura"
+while true; do
+  echo -en "${YELLOW}Partita IVA (11 cifre, senza prefisso IT): ${RESET}"
+  read -r PIVA
+  [[ ${#PIVA} -eq 11 && $PIVA =~ ^[0-9]+$ ]] && break
+  echo -e "${RED}  ❌ Formato non valido, riprova.${RESET}"
+done
+
+# ─── 2) Numerazione ─────────────────────────────────────────────────────────
+echo -en "${YELLOW}Numerazione [Standard]: ${RESET}"
+read -r NUMERAZIONE
+NUMERAZIONE=${NUMERAZIONE:-Standard}
+
+# ─── 3) Data emissione ───────────────────────────────────────────────────────
+echo -en "${YELLOW}Data emissione [$(date +%F)]: ${RESET}"
+read -r ISSUE_DATE
+ISSUE_DATE=${ISSUE_DATE:-$(date +%F)}
+
+# ─── 4) Tipo documento ──────────────────────────────────────────────────────
+header "Tipo documento (default 1=TD01)"
+options=("TD01" "TD01_ACC" "TD24" "TD25")
+PS3="  Scegli [1]: "
+select pick in "${options[@]}"; do
+  if [[ -z $pick ]]; then pick="TD01"; fi
+  TD=$pick
+  break
+done
+
+# ─── 5) Metodo pagamento ────────────────────────────────────────────────────
+echo -en "${YELLOW}Metodo di pagamento (vuoto=default): ${RESET}"
+read -r PM
+
+# ─── 6) Sconto ──────────────────────────────────────────────────────────────
+echo -en "${YELLOW}Sconto globale (€) [0]: ${RESET}"
+read -r SCONTO
+SCONTO=${SCONTO:-0}
+
+# ─── 7) Intestazione & Note ─────────────────────────────────────────────────
+echo -en "${YELLOW}Intestazione (vuoto=nessuna): ${RESET}"
+read -r HEADER
+echo -en "${YELLOW}Note aggiuntive (vuoto=nessuna): ${RESET}"
+read -r NOTE
+
+# ─── 8) Invia SDI ───────────────────────────────────────────────────────────
+echo -en "${YELLOW}Invia allo SDI? (y/n) [y]: ${RESET}"
+read -r yn
+case "${yn:-y}" in [Nn]*) INSDI=false ;; *) INSDI=true ;; esac
+
+# ─── 9) Articoli ────────────────────────────────────────────────────────────
+echo
+header "Inserisci gli articoli (digita ‘done’ come nome per terminare)"
+ARTICOLI=()
+while true; do
+  echo -en "${YELLOW} Nome articolo (o done): ${RESET}"
+  read -r nome
+  [[ $nome == done ]] && break
+  echo -en "${YELLOW} Quantità: ${RESET}"
+  read -r quantita
+  echo -en "${YELLOW} Prezzo unitario: ${RESET}"
+  read -r prezzo
+  echo -en "${YELLOW} IVA (%)[0]: ${RESET}"
+  read -r iva; iva=${iva:-0}
+  echo -en "${YELLOW} Descrizione: ${RESET}"
+  read -r descr
+  ARTICOLI+=("{\"nome\":\"$nome\",\"quantita\":$quantita,\"prezzo\":$prezzo,\"iva\":$iva,\"descrizione\":\"$descr\"}")
+done
+if (( ${#ARTICOLI[@]} )); then
+  ART_STRING="[$(IFS=,; echo "${ARTICOLI[*]}")]"
+else
+  ART_STRING="[]"
+fi
+
+# ─── 10) Scadenze ───────────────────────────────────────────────────────────
+echo
+header "Inserisci le scadenze (digita ‘done’ come data)"
+SCADENZE=()
+while true; do
+  echo -en "${YELLOW} Data scadenza (YYYY-MM-DD o done): ${RESET}"
+  read -r sdate
+  [[ $sdate == done ]] && break
+  echo -en "${YELLOW} Valore (importo o %): ${RESET}"
+  read -r sval
+  echo -en "${YELLOW} Tipo (percent/amount): ${RESET}"
+  read -r stype
+  SCADENZE+=("{\"date\":\"$sdate\",\"value\":$sval,\"type\":\"$stype\"}")
+done
+if (( ${#SCADENZE[@]} )); then
+  SCD_STRING="[$(IFS=,; echo "${SCADENZE[*]}")]"
+else
+  SCD_STRING="[]"
+fi
+
+# ─── 11) RIEPILOGO ──────────────────────────────────────────────────────────
+echo
+header "Riepilogo fattura"
+printf "%-18s%s\n" "PIVA:"            "$PIVA"
+printf "%-18s%s\n" "Numerazione:"     "$NUMERAZIONE"
+printf "%-18s%s\n" "Emissione:"       "$ISSUE_DATE"
+printf "%-18s%s\n" "Tipo documento:"  "$TD"
+printf "%-18s%s\n" "Metodo pagamento:""${PM:-<default>}"
+printf "%-18s€%s\n"    "Sconto:"          "$SCONTO"
+printf "%-18s%s\n"      "Intestazione:"    "${HEADER:-<nessuna>}"
+printf "%-18s%s\n"      "Note:"            "${NOTE:-<nessuna>}"
+printf "%-18s%s\n"      "Invia SDI:"       "$INSDI"
+echo
+printf "%-18s%s\n" "Articoli:"        "$ART_STRING"
+printf "%-18s%s\n" "Scadenze:"        "$SCD_STRING"
+
+echo
+echo -en "${YELLOW}Confermi e invii? (y/n) [y]: ${RESET}"
+read -r confirm
+[[ "${confirm:-y}" =~ ^[Nn] ]] && echo -e "${RED}Annullato${RESET}" && exit
+
+# ─── 12) CHIAMATA API ───────────────────────────────────────────────────────
+PAYLOAD=$(cat <<EOF
+{
+  "piva":            "$PIVA",
+  "numerazione":     "$NUMERAZIONE",
+  "issue_date":      "$ISSUE_DATE",
+  "tipo_documento":  "$TD",
+  "metodo_pagamento":"$PM",
+  "sconto":          $SCONTO,
+  "intestazione":    "$HEADER",
+  "note":            "$NOTE",
+  "invia_sdi":       $INSDI,
+  "articoli":        $ART_STRING,
+  "scadenze":        $SCD_STRING
+}
+EOF
+)
+
+echo
+echo -e "${YELLOW}⏳ Invio fattura...${RESET}"
+
+HTTP_RESPONSE=$(curl -s -w "\n%{http_code}" \
+  -H "Authorization: Bearer $API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Accept: application/json" \
+  --data "$PAYLOAD" \
+  "$API_URL")
+
+HTTP_BODY=$(echo "$HTTP_RESPONSE" | sed '$d')
+HTTP_STATUS=$(echo "$HTTP_RESPONSE" | tail -n1)
+
+echo
+echo -e "→ Status HTTP: ${GREEN}$HTTP_STATUS${RESET}"
+echo -e "→ Body di risposta:"
+echo "$HTTP_BODY" | jq . 2>/dev/null || echo "$HTTP_BODY"
+echo
+
+if (( HTTP_STATUS >= 200 && HTTP_STATUS < 300 )); then
+  echo -e "${GREEN}✅ Fattura creata:${RESET} $(echo "$HTTP_BODY" | jq -r '.data.url')"
+else
+  echo -e "${RED}❌ Creazione fallita, controlla i dettagli sopra.${RESET}"
+fi
