@@ -16,4 +16,4 @@
 Apri un terminale e lancia:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<tuo-user>/newo-cli/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/newo-io/cli/master/install.sh | bash
